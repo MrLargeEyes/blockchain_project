@@ -354,11 +354,12 @@ const autosaveWrap = document.getElementById('autosaveWrap');
 const autosaveCheck = document.getElementById('autosaveCheck');
 
 if(!supportsFSAccess){
-  // Firefox / Safari: no folder access API, fall back to auto-download only
-  folderLabel.textContent = 'Auto-download on capture';
+  // Firefox / Safari: File System Access API not available
+  folderLabel.textContent = 'Not supported in this browser';
   folderBtn.disabled = true;
-  folderBtn.style.opacity = '0.6';
-  folderBtn.style.cursor = 'default';
+  folderBtn.style.opacity = '0.5';
+  folderBtn.style.cursor = 'not-allowed';
+  setStatus('Folder saving needs Chrome or Edge. This browser can\'t grant folder access.');
 }
 
 folderBtn.addEventListener('click', async () => {
@@ -368,7 +369,7 @@ folderBtn.addEventListener('click', async () => {
     folderLabel.textContent = dirHandle.name;
     folderBtn.classList.add('linked');
     autosaveWrap.style.display = 'flex';
-    setStatus('');
+    setStatus('Ready — captures will save to "' + dirHandle.name + '".');
   }catch(err){
     // user cancelled the picker — not an error worth surfacing
     if(err.name !== 'AbortError'){
@@ -400,14 +401,7 @@ async function saveToFolder(dataUrl, filename){
   }
 }
 
-function triggerDownload(dataUrl, filename){
-  const a = document.createElement('a');
-  a.href = dataUrl;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
+
 
 function setStatus(msg){
   statusEl.textContent = msg || '';
@@ -473,6 +467,11 @@ function fullStop(){
 async function capturePhoto(){
   if(!currentStream) return;
 
+  if(!dirHandle){
+    setStatus('Choose a save folder before capturing.');
+    return;
+  }
+
   const w = video.videoWidth, h = video.videoHeight;
   if(!w || !h) return;
 
@@ -495,19 +494,17 @@ async function capturePhoto(){
 
   shotCount++;
   const filename = `photo-${String(shotCount).padStart(3,'0')}-${Date.now()}.png`;
-  let savedTo = null;
 
-  if(dirHandle && autosaveCheck.checked){
-    const ok = await saveToFolder(dataUrl, filename);
-    savedTo = ok ? dirHandle.name : null;
-    if(!ok) setStatus('Could not save to folder — check it in the filmstrip instead.');
-  } else if(!supportsFSAccess){
-    // no folder API available at all: always auto-download
-    triggerDownload(dataUrl, filename);
-    savedTo = 'downloads';
+  const ok = autosaveCheck.checked ? await saveToFolder(dataUrl, filename) : false;
+  if(autosaveCheck.checked && !ok){
+    setStatus('Could not save to folder — check permissions and try again.');
+  } else if(!autosaveCheck.checked){
+    setStatus('Auto-save is off — this shot was not written to the folder.');
+  } else {
+    setStatus('');
   }
 
-  addThumb(dataUrl, filename, savedTo);
+  addThumb(dataUrl, filename, ok ? dirHandle.name : null);
 }
 
 function addThumb(dataUrl, filename, savedTo){
