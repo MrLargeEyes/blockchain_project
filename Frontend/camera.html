@@ -81,6 +81,49 @@
     100%{box-shadow:0 0 0 0 rgba(217,97,79,0);}
   }
 
+  .folder-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    flex-wrap:wrap;
+    padding:0 2px;
+  }
+  .folder-btn{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    color:var(--text);
+    font-family:var(--mono);
+    font-size:11px;
+    letter-spacing:0.03em;
+    padding:7px 10px;
+    border-radius:8px;
+    cursor:pointer;
+  }
+  .folder-btn svg{ width:14px; height:14px; flex:0 0 auto; }
+  .folder-btn:hover{ background:#2c2e32; }
+  .folder-btn.linked{
+    color:var(--accent);
+    border-color:var(--accent-dim);
+  }
+  .autosave-toggle{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    font-family:var(--mono);
+    font-size:11px;
+    color:var(--text-dim);
+    cursor:pointer;
+    user-select:none;
+  }
+  .autosave-toggle input{
+    accent-color: var(--accent);
+    width:13px; height:13px;
+  }
+
   .viewfinder{
     position:relative;
     aspect-ratio: 4/3;
@@ -208,6 +251,14 @@
     display:flex; align-items:center; justify-content:center;
   }
   .frame-thumb .dl svg{ width:10px; height:10px; color:#fff; }
+  .frame-thumb .saved-badge{
+    position:absolute; bottom:2px; right:2px;
+    background:rgba(232,163,61,0.9);
+    border-radius:4px;
+    width:18px; height:18px;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .frame-thumb .saved-badge svg{ width:11px; height:11px; color:#1a1a1a; }
 
   .empty-strip{
     display:flex; align-items:center;
@@ -227,6 +278,17 @@
     <div class="top-strip">
       <span class="brand">Aperture</span>
       <span class="rec-dot"><span class="d"></span>LIVE</span>
+    </div>
+
+    <div class="folder-row">
+      <button id="folderBtn" class="folder-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+        <span id="folderLabel">Choose save folder</span>
+      </button>
+      <label class="autosave-toggle" id="autosaveWrap" style="display:none;">
+        <input type="checkbox" id="autosaveCheck" checked>
+        <span>Auto-save on capture</span>
+      </label>
     </div>
 
     <div class="viewfinder" id="viewfinder">
@@ -282,6 +344,70 @@ const shutterBtn = document.getElementById('shutterBtn');
 let currentStream = null;
 let facingMode = 'user'; // 'user' = front, 'environment' = rear
 let shotCount = 0;
+
+let dirHandle = null; // File System Access API directory handle, if granted
+const supportsFSAccess = 'showDirectoryPicker' in window;
+
+const folderBtn = document.getElementById('folderBtn');
+const folderLabel = document.getElementById('folderLabel');
+const autosaveWrap = document.getElementById('autosaveWrap');
+const autosaveCheck = document.getElementById('autosaveCheck');
+
+if(!supportsFSAccess){
+  // Firefox / Safari: no folder access API, fall back to auto-download only
+  folderLabel.textContent = 'Auto-download on capture';
+  folderBtn.disabled = true;
+  folderBtn.style.opacity = '0.6';
+  folderBtn.style.cursor = 'default';
+}
+
+folderBtn.addEventListener('click', async () => {
+  if(!supportsFSAccess) return;
+  try{
+    dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    folderLabel.textContent = dirHandle.name;
+    folderBtn.classList.add('linked');
+    autosaveWrap.style.display = 'flex';
+    setStatus('');
+  }catch(err){
+    // user cancelled the picker — not an error worth surfacing
+    if(err.name !== 'AbortError'){
+      console.error(err);
+      setStatus('Could not access that folder: ' + err.message);
+    }
+  }
+});
+
+async function saveToFolder(dataUrl, filename){
+  if(!dirHandle) return false;
+  try{
+    // verify/re-request permission in case it lapsed
+    const perm = await dirHandle.queryPermission({ mode: 'readwrite' });
+    if(perm !== 'granted'){
+      const req = await dirHandle.requestPermission({ mode: 'readwrite' });
+      if(req !== 'granted') return false;
+    }
+    const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+    const writable = await fileHandle.createWritable();
+    const blob = await (await fetch(dataUrl)).blob();
+    await writable.write(blob);
+    await writable.close();
+    return true;
+  }catch(err){
+    console.error(err);
+    setStatus('Save failed: ' + err.message);
+    return false;
+  }
+}
+
+function triggerDownload(dataUrl, filename){
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
 
 function setStatus(msg){
   statusEl.textContent = msg || '';
@@ -344,7 +470,7 @@ function fullStop(){
   switchBtn.disabled = true;
 }
 
-function capturePhoto(){
+async function capturePhoto(){
   if(!currentStream) return;
 
   const w = video.videoWidth, h = video.videoHeight;
@@ -362,15 +488,29 @@ function capturePhoto(){
   ctx.drawImage(video, 0, 0, w, h);
 
   const dataUrl = canvas.toDataURL('image/png');
-  addThumb(dataUrl);
 
   flash.classList.remove('go');
   void flash.offsetWidth; // restart animation
   flash.classList.add('go');
+
+  shotCount++;
+  const filename = `photo-${String(shotCount).padStart(3,'0')}-${Date.now()}.png`;
+  let savedTo = null;
+
+  if(dirHandle && autosaveCheck.checked){
+    const ok = await saveToFolder(dataUrl, filename);
+    savedTo = ok ? dirHandle.name : null;
+    if(!ok) setStatus('Could not save to folder — check it in the filmstrip instead.');
+  } else if(!supportsFSAccess){
+    // no folder API available at all: always auto-download
+    triggerDownload(dataUrl, filename);
+    savedTo = 'downloads';
+  }
+
+  addThumb(dataUrl, filename, savedTo);
 }
 
-function addThumb(dataUrl){
-  shotCount++;
+function addThumb(dataUrl, filename, savedTo){
   emptyStrip.style.display = 'none';
   filmstrip.style.display = 'flex';
 
@@ -381,12 +521,21 @@ function addThumb(dataUrl){
   img.src = dataUrl;
   wrap.appendChild(img);
 
-  const dl = document.createElement('a');
-  dl.className = 'dl';
-  dl.href = dataUrl;
-  dl.download = `photo-${shotCount}-${Date.now()}.png`;
-  dl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-  wrap.appendChild(dl);
+  if(savedTo){
+    const badge = document.createElement('div');
+    badge.className = 'saved-badge';
+    badge.title = savedTo === 'downloads' ? 'Saved to Downloads' : `Saved to "${savedTo}"`;
+    badge.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    wrap.appendChild(badge);
+  } else {
+    // no auto-save happened — offer manual download from the thumbnail
+    const dl = document.createElement('a');
+    dl.className = 'dl';
+    dl.href = dataUrl;
+    dl.download = filename;
+    dl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    wrap.appendChild(dl);
+  }
 
   wrap.title = 'Click thumbnail to open full size';
   wrap.addEventListener('click', (e) => {
